@@ -46,6 +46,14 @@ def api_url(base, workspace, project, item_id=None):
     return url
 
 
+def get_description(item):
+    return (
+        item.get("description_html")
+        or item.get("description")
+        or ""
+    )
+
+
 def list_items(base, key, workspace, project):
     url = api_url(base, workspace, project)
     items = []
@@ -80,20 +88,35 @@ def get_item(base, key, workspace, project, item_id):
     return r.json()
 
 
+def update_item(base, key, workspace, project, item_id, body):
+    r = requests.patch(
+        api_url(base, workspace, project, item_id),
+        headers=headers(key),
+        json=body,
+        timeout=30,
+    )
+
+    if not r.ok:
+        print("Update failed:", r.status_code, r.text, flush=True)
+
+    r.raise_for_status()
+    return r.json()
+
+
 def create_item_in_ce(cloud_item):
+    state_map, _ = load_state_map()
+
     body = {
         "name": cloud_item.get("name") or "Untitled note",
-        "description_html": (
-            cloud_item.get("description_html")
-            or cloud_item.get("description")
-            or ""
-        ),
+        "description_html": get_description(cloud_item),
         "priority": cloud_item.get("priority") or "none",
-        "labels": [env("CE_SYNC_LABEL_ID")]
     }
 
+    ce_sync_label_id = os.getenv("CE_SYNC_LABEL_ID")
+    if ce_sync_label_id:
+        body["labels"] = [ce_sync_label_id]
+
     cloud_state = cloud_item.get("state")
-    state_map, _ = load_state_map()
     ce_state = state_map.get(cloud_state)
 
     if ce_state:
@@ -109,17 +132,10 @@ def create_item_in_ce(cloud_item):
         json=body,
         timeout=30,
     )
-    r.raise_for_status()
-    return r.json()
 
+    if not r.ok:
+        print("Create CE item failed:", r.status_code, r.text, flush=True)
 
-def update_item(base, key, workspace, project, item_id, body):
-    r = requests.patch(
-        api_url(base, workspace, project, item_id),
-        headers=headers(key),
-        json=body,
-        timeout=30,
-    )
     r.raise_for_status()
     return r.json()
 
@@ -144,7 +160,6 @@ def sync_state_pair(cloud_item, ce_item, record):
 
     print(
         f"State check {cloud_item.get('name')}: "
-        f"cloud={cloud_state}, ce={ce_state}, "
         f"cloud_changed={cloud_changed}, ce_changed={ce_changed}",
         flush=True,
     )
@@ -153,7 +168,7 @@ def sync_state_pair(cloud_item, ce_item, record):
         new_ce_state = state_map.get(cloud_state)
 
         if new_ce_state and new_ce_state != ce_state:
-            print(f"Cloud state changed. Updating CE {ce_id} -> {new_ce_state}", flush=True)
+            print(f"Cloud state changed. Updating CE {ce_id}", flush=True)
             ce_item = update_item(
                 env("CE_BASE_URL"),
                 env("CE_API_KEY"),
@@ -168,7 +183,7 @@ def sync_state_pair(cloud_item, ce_item, record):
         new_cloud_state = reverse_state_map.get(ce_state)
 
         if new_cloud_state and new_cloud_state != cloud_state:
-            print(f"CE state changed. Updating Cloud {cloud_id} -> {new_cloud_state}", flush=True)
+            print(f"CE state changed. Updating Cloud {cloud_id}", flush=True)
             cloud_item = update_item(
                 env("CLOUD_BASE_URL"),
                 env("CLOUD_API_KEY"),
@@ -184,7 +199,7 @@ def sync_state_pair(cloud_item, ce_item, record):
         new_cloud_state = reverse_state_map.get(ce_state)
 
         if new_cloud_state and new_cloud_state != cloud_state:
-            print(f"Conflict detected. CE wins. Updating Cloud {cloud_id} -> {new_cloud_state}", flush=True)
+            print(f"State conflict. CE wins. Updating Cloud {cloud_id}", flush=True)
             cloud_item = update_item(
                 env("CLOUD_BASE_URL"),
                 env("CLOUD_API_KEY"),
@@ -200,71 +215,95 @@ def sync_state_pair(cloud_item, ce_item, record):
 
     return record
 
+
 def sync_text_pair(cloud_item, ce_item, record):
+    cloud_id = cloud_item["id"]
+    ce_id = ce_item["id"]
+
     cloud_name = cloud_item.get("name") or ""
     ce_name = ce_item.get("name") or ""
 
-    cloud_desc = cloud_item.get("description_html") or cloud_item.get("description") or ""
-    ce_desc = ce_item.get("description_html") or ce_item.get("description") or ""
+    cloud_desc = get_description(cloud_item)
+    ce_desc = get_description(ce_item)
 
-    cloud_changed = (
-        cloud_name != record.get("last_cloud_name")
-        or cloud_desc != record.get("last_cloud_description_html")
-    )
+    last_cloud_name = record.get("last_cloud_name", cloud_name)
+    last_ce_name = record.get("last_ce_name", ce_name)
+    last_cloud_desc = record.get("last_cloud_description_html", cloud_desc)
+    last_ce_desc = record.get("last_ce_description_html", ce_desc)
 
-    ce_changed = (
-        ce_name != record.get("last_ce_name")
-        or ce_desc != record.get("last_ce_description_html")
-    )
+    cloud_changed = cloud_name != last_cloud_name or cloud_desc != last_cloud_desc
+    ce_changed = ce_name != last_ce_name or ce_desc != last_ce_desc
 
     if not cloud_changed and not ce_changed:
         return record
 
+    print(
+        f"Text check {cloud_name}: "
+        f"cloud_changed={cloud_changed}, ce_changed={ce_changed}",
+        flush=True,
+    )
+
+    # print("Cloud desc:", repr(cloud_desc), flush=True)
+    # print("CE desc:", repr(ce_desc), flush=True)
+
     if cloud_changed and not ce_changed:
+        print(f"Cloud text changed. Updating CE {ce_id}", flush=True)
+
         ce_item = update_item(
             env("CE_BASE_URL"),
             env("CE_API_KEY"),
             env("CE_WORKSPACE"),
             env("CE_PROJECT_ID"),
-            ce_item["id"],
+            ce_id,
             {
                 "name": cloud_name,
                 "description_html": cloud_desc,
             },
         )
+
         ce_name = ce_item.get("name") or ""
-        ce_desc = ce_item.get("description_html") or ce_item.get("description") or ""
+        ce_desc = get_description(ce_item)
 
     elif ce_changed and not cloud_changed:
+        print(f"CE text changed. Updating Cloud {cloud_id}", flush=True)
+
         cloud_item = update_item(
             env("CLOUD_BASE_URL"),
             env("CLOUD_API_KEY"),
             env("CLOUD_WORKSPACE"),
             env("CLOUD_PROJECT_ID"),
-            cloud_item["id"],
+            cloud_id,
             {
                 "name": ce_name,
                 "description_html": ce_desc,
             },
         )
+
+        print("Cloud update response:", json.dumps(cloud_item, indent=2), flush=True)
+
         cloud_name = cloud_item.get("name") or ""
-        cloud_desc = cloud_item.get("description_html") or cloud_item.get("description") or ""
+        cloud_desc = get_description(cloud_item)
 
     elif cloud_changed and ce_changed:
-        # Conflict rule: CE wins
+        # Conflict rule: CE wins.
+        print(f"Text conflict. CE wins. Updating Cloud {cloud_id}", flush=True)
+
         cloud_item = update_item(
             env("CLOUD_BASE_URL"),
             env("CLOUD_API_KEY"),
             env("CLOUD_WORKSPACE"),
             env("CLOUD_PROJECT_ID"),
-            cloud_item["id"],
+            cloud_id,
             {
                 "name": ce_name,
                 "description_html": ce_desc,
             },
         )
+
+        print("Cloud conflict update response:", json.dumps(cloud_item, indent=2), flush=True)
+
         cloud_name = cloud_item.get("name") or ""
-        cloud_desc = cloud_item.get("description_html") or cloud_item.get("description") or ""
+        cloud_desc = get_description(cloud_item)
 
     record["last_cloud_name"] = cloud_name
     record["last_ce_name"] = ce_name
@@ -275,9 +314,9 @@ def sync_text_pair(cloud_item, ce_item, record):
 
 
 def run_once():
-    sync_state, _ = load_state_map()
-    if not sync_state:
-        print("WARNING: STATE_MAP is empty. Issue creation works, but state sync will not.", flush=True)
+    state_map, _ = load_state_map()
+    if not state_map:
+        print("WARNING: STATE_MAP is empty. State sync disabled.", flush=True)
 
     state = load_state()
 
@@ -305,14 +344,20 @@ def run_once():
                 "last_ce_state": ce_item.get("state"),
                 "last_cloud_name": cloud_item.get("name") or "",
                 "last_ce_name": ce_item.get("name") or "",
-                "last_cloud_description_html": cloud_item.get("description_html") or cloud_item.get("description") or "",
-                "last_ce_description_html": ce_item.get("description_html") or ce_item.get("description") or "",
+                "last_cloud_description_html": get_description(cloud_item),
+                "last_ce_description_html": get_description(ce_item),
             }
 
             save_state(state)
             continue
 
         record = state[cloud_id]
+
+        # Upgrade old synced.json format automatically.
+        if isinstance(record, str):
+            record = {"ce_id": record}
+            state[cloud_id] = record
+
         ce_id = record["ce_id"]
 
         try:
@@ -327,8 +372,20 @@ def run_once():
             print(f"Could not fetch CE item {ce_id}: {e}", flush=True)
             continue
 
-        state[cloud_id] = sync_state_pair(cloud_item, ce_item, record)
-        state[cloud_id] = sync_text_pair(cloud_item, ce_item, state[cloud_id])
+        record = sync_state_pair(cloud_item, ce_item, record)
+
+        # Re-fetch CE after possible state update, so text sync uses fresh data.
+        ce_item = get_item(
+            env("CE_BASE_URL"),
+            env("CE_API_KEY"),
+            env("CE_WORKSPACE"),
+            env("CE_PROJECT_ID"),
+            ce_id,
+        )
+
+        record = sync_text_pair(cloud_item, ce_item, record)
+
+        state[cloud_id] = record
         save_state(state)
 
 

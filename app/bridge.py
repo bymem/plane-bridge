@@ -279,7 +279,7 @@ def sync_text_pair(cloud_item, ce_item, record):
             },
         )
 
-        print("Cloud update response:", json.dumps(cloud_item, indent=2), flush=True)
+        # print("Cloud update response:", json.dumps(cloud_item, indent=2), flush=True)
 
         cloud_name = cloud_item.get("name") or ""
         cloud_desc = get_description(cloud_item)

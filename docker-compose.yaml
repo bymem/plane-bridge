@@ -1,0 +1,14 @@
+services:
+  plane-bridge:
+    image: python:3.12-slim
+    container_name: plane-bridge
+    working_dir: /app
+    volumes:
+      - ./app:/app
+      - ./data:/data
+    env_file:
+      - .env
+    command: sh -c "pip install requests && python -u bridge.py"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
